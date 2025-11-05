@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Program Beta Encryptor</title>
+<style>
+body { font-family: Arial; background: #0f0f0f; color: #00ffe7; text-align: center; margin-top: 60px; }
+input, select, button { margin: 8px; padding: 10px; border-radius: 8px; border: none; font-size: 15px; }
+button { background: #00ffe7; color: #000; cursor: pointer; }
+.container { border: 2px solid #00ffe7; border-radius: 10px; padding: 20px; display: inline-block; }
+h1 { color: #00ffe7; text-shadow: 0 0 10px #00ffe7; }
+</style>
+</head>
+<body>
+<h1>🔐 Program Beta Encryptor</h1>
+<div class="container">
+  <input type="file" id="fileInput"><br>
+  <input type="text" id="password" placeholder="Enter password (ex: prodragbeta)"><br>
+  <select id="method">
+    <option value="AES-GCM">AES-GCM (default)</option>
+    <option value="Base64">Base64</option>
+    <option value="XOR">XOR Simple</option>
+  </select><br>
+  <button onclick="encryptFile()">Encrypt</button>
+  <button onclick="decryptFile()">Decrypt</button>
+  <p id="status"></p>
+</div>
+
+<script>
+async function readFile(file) {
+  return new Uint8Array(await file.arrayBuffer());
+}
+
+function download(filename, data) {
+  const blob = new Blob([data], {type: "application/octet-stream"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function encryptFile() {
+  const file = document.getElementById("fileInput").files[0];
+  const password = document.getElementById("password").value;
+  const method = document.getElementById("method").value;
+  if (!file || !password) return alert("Select a file and enter a password!");
+  const data = await readFile(file);
+
+  let result;
+  if (method === "Base64") {
+    result = btoa(String.fromCharCode(...data));
+  } else if (method === "XOR") {
+    const key = password.charCodeAt(0);
+    result = data.map(b => b ^ key);
+  } else {
+    const pwUtf8 = new TextEncoder().encode(password);
+    const key = await crypto.subtle.importKey("raw", pwUtf8, "AES-GCM", false, ["encrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const enc = await crypto.subtle.encrypt({name: "AES-GCM", iv}, key, data);
+    result = new Uint8Array([...iv, ...new Uint8Array(enc)]);
+  }
+  download(file.name + ".enc", result);
+  document.getElementById("status").innerText = "✅ File encrypted successfully!";
+}
+
+async function decryptFile() {
+  const file = document.getElementById("fileInput").files[0];
+  const password = document.getElementById("password").value;
+  const method = document.getElementById("method").value;
+  if (!file || !password) return alert("Select a file and enter a password!");
+  const data = await readFile(file);
+
+  let result;
+  if (method === "Base64") {
+    result = Uint8Array.from(atob(new TextDecoder().decode(data)), c => c.charCodeAt(0));
+  } else if (method === "XOR") {
+    const key = password.charCodeAt(0);
+    result = data.map(b => b ^ key);
+  } else {
+    const pwUtf8 = new TextEncoder().encode(password);
+    const key = await crypto.subtle.importKey("raw", pwUtf8, "AES-GCM", false, ["decrypt"]);
+    const iv = data.slice(0, 12);
+    const enc = data.slice(12);
+    try {
+      const dec = await crypto.subtle.decrypt({name: "AES-GCM", iv}, key, enc);
+      result = new Uint8Array(dec);
+    } catch {
+      return alert("❌ Wrong password or corrupted file!");
+    }
+  }
+  download(file.name.replace(".enc",""), result);
+  document.getElementById("status").innerText = "✅ File decrypted successfully!";
+}
+</script>
+</body>
+</html>
