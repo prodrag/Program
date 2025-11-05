@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Program Beta Encrypt</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #121212; color: #eee; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+    textarea { width: 80%; height: 100px; margin: 10px 0; }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; background: #ff5722; color: #fff; border: none; border-radius: 5px; }
+    button:hover { opacity: 0.9; }
+  </style>
+</head>
+<body>
+  <h1>Program Beta Encrypt</h1>
+  <textarea id="inputText" placeholder="Masukkan teks yang akan diencrypt..."></textarea>
+  <br>
+  <button onclick="encryptText()">Encrypt</button>
+  <button onclick="decryptText()">Decrypt</button>
+  <textarea id="outputText" placeholder="Hasil akan muncul di sini..." readonly></textarea>
+
+  <script>
+    function encryptText() {
+      let text = document.getElementById('inputText').value;
+      let encrypted = btoa(text); // Simple Base64
+      document.getElementById('outputText').value = encrypted;
+    }
+
+    function decryptText() {
+      let text = document.getElementById('inputText').value;
+      try {
+        let decrypted = atob(text); // Simple Base64 decode
+        document.getElementById('outputText').value = decrypted;
+      } catch (e) {
+        alert('Input tidak valid untuk dekripsi!');
+      }
+    }
+  </script>
+</body>
+</html>
