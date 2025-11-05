@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PROGRAM-BETA — Encryptor Lokal</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:18px;background:#f7f7fb;color:#111}
+  .card{background:white;border-radius:10px;padding:16px;margin-bottom:12px;box-shadow:0 6px 18px rgba(20,20,40,0.06)}
+  h1{margin:0 0 8px;font-size:20px}
+  label{display:block;margin-top:8px;font-size:13px}
+  input[type="text"], input[type="password"], select, textarea {width:100%;padding:8px;border-radius:6px;border:1px solid #d7dbe6;box-sizing:border-box;margin-top:6px}
+  button{padding:8px 12px;border-radius:8px;border:0;background:#0b63d6;color:white;cursor:pointer;margin-right:8px}
+  small{color:#555}
+  pre{background:#0f1724;color:#e6eef8;padding:8px;border-radius:6px;overflow:auto}
+  .row{display:flex;gap:8px}
+  .col{flex:1}
+  .danger{color:#b00020}
+  .ok{color:#0b7a3a}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>PROGRAM-BETA — Encryptor Lokal</h1>
+    <small>Offline, di browser. AES-GCM (direkomendasikan) / XOR / Custom JS. Hasil berformat: header + salt + iv + ciphertext.</small>
+  </div>
+
+  <div class="card">
+    <label>File target (pilih file .lua / .txt / lainnya)</label>
+    <input id="fileInput" type="file" />
+
+    <label>Passphrase / Password</label>
+    <input id="password" type="password" placeholder="Masukkan password (untuk AES / XOR / Custom)" />
+
+    <label>Metode</label>
+    <select id="method">
+      <option value="aesgcm">AES-GCM (strong)</option>
+      <option value="xor">XOR (obfuscation)</option>
+      <option value="custom">Custom JS (user function)</option>
+    </select>
+
+    <div id="customArea" style="display:none;margin-top:8px">
+      <label>Custom JS (fungsi harus mengembalikan Uint8Array)</label>
+      <small>Contoh: <code>function encryptWithCustom(u8, pass){ /* return Uint8Array */ }</code> dan <code>function decryptWithCustom(u8, pass){ /* return Uint8Array */ }</code></small>
+      <textarea id="customJS" rows="8" placeholder="// function encryptWithCustom(u8, pass){/*...*/}\n// function decryptWithCustom(u8, pass){/*...*/}"></textarea>
+    </div>
+
+    <label style="margin-top:12px">Opsi Output</label>
+    <div class="row">
+      <div class="col">
+        <button id="btnEncrypt">Encrypt</button>
+        <button id="btnDecrypt">Decrypt</button>
+      </div>
+      <div class="col" style="text-align:right">
+        <small id="status">Status: siap</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>Preview (Base64 / Hex)</label>
+    <div class="row">
+      <div class="col"><button id="showBase64">Show Base64</button></div>
+      <div class="col"><button id="showHex">Show Hex</button></div>
+    </div>
+    <pre id="preview" style="height:160px">Hasil akan muncul di sini.</pre>
+    <div style="margin-top:8px">
+      <button id="downloadBtn" style="display:none">Download hasil</button>
+      <small id="downloadInfo"></small>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Petunjuk format file hasil</h3>
+    <p>
+      Untuk memudahkan dekripsi di tempat lain (mis. APK), tool ini menulis header di depan hasil enkripsi.
+      Format (bytes awal):
+    </p>
+    <pre>
+    4 bytes header tag:
+      "AESG" => AES-GCM
+      "XOR_" => XOR
+      "CSTM" => Custom (as-is)
+
+    next: 16 bytes salt (Uint8)
+    next: 12 bytes IV (AES) or 0 for XOR (12 bytes of zeros)
+    rest: ciphertext bytes
+    </pre>
+    <p>Contoh: AESG | salt(16) | iv(12) | ciphertext</p>
+  </div>
+
+<script>
+(async function(){
+  // Helpers
+  const el = id => document.getElementById(id);
+  const status = txt => { el('status').textContent = 'Status: ' + txt; };
+  const toHex = bytes => Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join('');
+  const fromHex = hex => {
+    if(hex.length % 2) throw new Error('Invalid hex');
+    const out = new Uint8Array(hex.length/2);
+    for(let i=0;i<out.length;i++) out[i]=parseInt(hex.substr(i*2,2),16);
+    return out;
+  };
+  function bufToBase64(buf){
+    let s = '', bytes = new Uint8Array(buf);
+    for (let i=0;i<bytes.length;i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+  }
+  function base64ToBuf(b64){
+    const s = atob(b64);
+    const u = new Uint8Array(s.length);
+    for(let i=0;i<s.length;i++) u[i] = s.charCodeAt(i);
+    return u.buffer;
+  }
+
+  function concatUint8(...parts){
+    const total = parts.reduce((s,p)=>s + p.byteLength, 0);
+    const out = new Uint8Array(total);
+    let offset=0;
+    for(const p of parts){
+      out.set(new Uint8Array(p), offset);
+      offset += p.byteLength;
+    }
+    return out;
+  }
+
+  // Crypto low-level helpers
+  async function deriveKey(passphrase, salt, iterations=100000, keyLen=256){
+    const enc = new TextEncoder();
+    const baseKey = await crypto.subtle.importKey('raw', enc.encode(passphrase), {name:'PBKDF2'}, false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      {name:'PBKDF2', salt, iterations, hash:'SHA-256'},
+      baseKey,
+      {name:'AES-GCM', length:keyLen},
+      false,
+      ['encrypt','decrypt']
+    );
+  }
+
+  // UI wiring
+  el('method').addEventListener('change', e=>{
+    el('customArea').style.display = e.target.value === 'custom' ? 'block' : 'none';
+  });
+
+  let lastResult = null;
+  let lastFilename = '';
+
+  // Core operations
+  async function encryptFile(file, pass, method){
+    status('membaca file...');
+    const arrBuf = await file.arrayBuffer();
+    status('siap memproses...');
+
+    if(method === 'aesgcm'){
+      // AES-GCM flow: salt(16) + iv(12) + ciphertext ; header 'AESG'
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const key = await deriveKey(pass, salt.buffer, 200000);
+      const cipher = await crypto.subtle.encrypt({name:'AES-GCM', iv:iv}, key, arrBuf);
+      const header = new TextEncoder().encode('AESG');
+      const out = concatUint8(header.buffer, salt.buffer, iv.buffer, cipher);
+      lastResult = out;
+      lastFilename = file.name + '.enc';
+      status('encrypt AES-GCM selesai');
+      return out;
+    }
+
+    if(method === 'xor'){
+      // XOR obfuscation. We'll still produce salt for variability.
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      // derive a key stream via PBKDF2 to mix with file bytes (not secure as real cipher, but better than plain XOR with pass)
+      const derived = await deriveKey(pass, salt.buffer, 100000);
+      // export raw key bytes (AES key) to use as keystream base
+      const raw = new Uint8Array(await crypto.subtle.exportKey('raw', derived));
+      const src = new Uint8Array(arrBuf);
+      const out = new Uint8Array(src.length);
+      for(let i=0;i<src.length;i++){
+        out[i] = src[i] ^ raw[i % raw.length];
+      }
+      const iv = new Uint8Array(12); // zeros
+      const header = new TextEncoder().encode('XOR_');
+      const blob = concatUint8(header.buffer, salt.buffer, iv.buffer, out.buffer);
+      lastResult = blob;
+      lastFilename = file.name + '.xor';
+      status('encrypt XOR selesai');
+      return blob;
+    }
+
+    if(method === 'custom'){
+      // Evaluate user function in sandboxed Function (note: runs locally in browser)
+      const src = el('customJS').value || '';
+      if(!/encryptWithCustom\s*\(/.test(src)){
+        throw new Error('Custom JS harus mendefinisikan function encryptWithCustom(u8, pass){...}');
+      }
+      // Create a wrapper function to call user code
+      const wrapper = new Function('"use strict";' + src + '; return {enc:encryptWithCustom, dec:typeof decryptWithCustom === "function" ? decryptWithCustom : null};')();
+      const u8 = new Uint8Array(arrBuf);
+      const outU8 = await Promise.resolve(wrapper.enc(u8, pass));
+      if(!(outU8 instanceof Uint8Array)) throw new Error('encryptWithCustom harus mengembalikan Uint8Array');
+      const header = new TextEncoder().encode('CSTM');
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const iv = crypto.getRandomValues(new Uint8Array(12)); // random filler so format matches
+      const blob = concatUint8(header.buffer, salt.buffer, iv.buffer, outU8.buffer);
+      lastResult = blob;
+      lastFilename = file.name + '.cstm';
+      status('encrypt custom selesai');
+      return blob;
+    }
+
+    throw new Error('Method tidak dikenali');
+  }
+
+  async function decryptBuffer(buffer, pass){
+    status('memproses dekripsi...');
+    const u = new Uint8Array(buffer);
+    if(u.length < 4) throw new Error('Data terlalu pendek');
+    const tag = new TextDecoder().decode(u.slice(0,4));
+    const salt = u.slice(4,20);
+    const iv = u.slice(20,32);
+    const cipher = u.slice(32).buffer;
+
+    if(tag === 'AESG'){
+      const key = await deriveKey(pass, salt.buffer, 200000);
+      const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv:iv}, key, cipher);
+      lastResult = new Uint8Array(plain);
+      lastFilename = 'decrypted.bin';
+      status('decrypt AES-GCM sukses');
+      return lastResult;
+    }
+    if(tag === 'XOR_'){
+      const derived = await deriveKey(pass, salt.buffer, 100000);
+      const raw = new Uint8Array(await crypto.subtle.exportKey('raw', derived));
+      const c = new Uint8Array(cipher);
+      const out = new Uint8Array(c.length);
+      for(let i=0;i<c.length;i++) out[i] = c[i] ^ raw[i % raw.length];
+      lastResult = out;
+      lastFilename = 'decrypted.bin';
+      status('decrypt XOR selesai');
+      return out;
+    }
+    if(tag === 'CSTM'){
+      const src = el('customJS').value || '';
+      if(!/decryptWithCustom\s*\(/.test(src)) throw new Error('Custom JS harus mendefinisikan function decryptWithCustom(u8, pass){...}');
+      const wrapper = new Function('"use strict";' + src + '; return {enc:typeof encryptWithCustom === "function" ? encryptWithCustom : null, dec:decryptWithCustom};')();
+      const payload = new Uint8Array(cipher);
+      const outU8 = await Promise.resolve(wrapper.dec(payload, pass));
+      if(!(outU8 instanceof Uint8Array)) throw new Error('decryptWithCustom harus mengembalikan Uint8Array');
+      lastResult = outU8;
+      lastFilename = 'decrypted.bin';
+      status('decrypt custom selesai');
+      return outU8;
+    }
+    throw new Error('Header tidak dikenali: ' + tag);
+  }
+
+  // Buttons
+  el('btnEncrypt').addEventListener('click', async ()=>{
+    try{
+      const f = el('fileInput').files[0];
+      if(!f){ alert('Pilih file dulu'); return; }
+      const pass = el('password').value;
+      if(!pass){ if(!confirm('Password kosong? lanjutkan?')) return; }
+      const method = el('method').value;
+      el('downloadBtn').style.display='none';
+      status('memulai proses encrypt...');
+      const out = await encryptFile(f, pass, method);
+      el('preview').textContent = 'Encrypt selesai. Klik "Show Base64" atau "Show Hex" untuk preview.' + '\\nSize: ' + out.byteLength + ' bytes';
+      el('downloadBtn').style.display='inline-block';
+      el('downloadBtn').onclick = ()=> {
+        const blob = new Blob([out], {type:'application/octet-stream'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = lastFilename || (f.name + '.enc');
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+      el('downloadInfo').textContent = 'File: ' + (lastFilename || f.name) + ' — ' + out.byteLength + ' bytes';
+    }catch(err){
+      console.error(err);
+      alert('Error: ' + err.message);
+      status('error');
+    }
+  });
+
+  el('btnDecrypt').addEventListener('click', async ()=>{
+    try{
+      const f = el('fileInput').files[0];
+      if(!f){ alert('Pilih file terenkripsi dulu'); return; }
+      const pass = el('password').value;
+      if(!pass){ if(!confirm('Password kosong? lanjutkan?')) return; }
+      el('downloadBtn').style.display='none';
+      status('membaca file untuk dekripsi...');
+      const buf = await f.arrayBuffer();
+      const out = await decryptBuffer(buf, pass);
+      el('preview').textContent = 'Decrypt selesai. Klik "Show Base64" atau "Show Hex" untuk preview.' + '\\nSize: ' + out.byteLength + ' bytes';
+      el('downloadBtn').style.display='inline-block';
+      el('downloadBtn').onclick = ()=> {
+        const blob = new Blob([out], {type:'application/octet-stream'});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = lastFilename || 'decrypted.bin';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+      el('downloadInfo').textContent = 'File: ' + (lastFilename || 'decrypted.bin') + ' — ' + out.byteLength + ' bytes';
+      status('siap');
+    }catch(err){
+      console.error(err);
+      alert('Error: ' + err.message);
+      status('error');
+    }
+  });
+
+  el('showBase64').addEventListener('click', ()=>{
+    if(!lastResult){ alert('Belum ada hasil untuk ditampilkan'); return; }
+    el('preview').textContent = bufToBase64(lastResult.buffer);
+  });
+  el('showHex').addEventListener('click', ()=>{
+    if(!lastResult){ alert('Belum ada hasil untuk ditampilkan'); return; }
+    el('preview').textContent = toHex(new Uint8Array(lastResult.buffer));
+  });
+
+  // small safety note
+  console.log('PROGRAM-BETA Encryptor siap (offline).');
+  status('siap');
+})();
+</script>
+</body>
+</html>
